@@ -975,7 +975,10 @@ async function startServer() {
         const user = await userRepo.getById(userId);
         if (user) {
           const members = await groupRepo.getMembers(groupId);
-          isMember = members.some((m) => m.userId === userId && m.status === 'ACTIVE');
+          const cleanEmail = user.email.toLowerCase().trim();
+          isMember = members.some((m) =>
+            (m.userId === userId || (m.user?.email && m.user.email.toLowerCase().trim() === cleanEmail)) && m.status === 'ACTIVE'
+          );
           if (!isMember && (group.ownerUserId === userId || user.role === 'ADMIN')) {
             await groupRepo.addMember(groupId, userId, 'ADMIN');
             isMember = true;
@@ -1022,7 +1025,10 @@ async function startServer() {
       if (!group) return res.status(404).json({ error: 'Group not found' });
 
       const members = await groupRepo.getMembers(groupId);
-      let isMember = members.some((m) => m.userId === userId && m.status === 'ACTIVE');
+      const cleanEmail = user.email.toLowerCase().trim();
+      let isMember = members.some((m) =>
+        (m.userId === userId || (m.user?.email && m.user.email.toLowerCase().trim() === cleanEmail)) && m.status === 'ACTIVE'
+      );
       if (!isMember && (group.ownerUserId === userId || user.role === 'ADMIN')) {
         await groupRepo.addMember(groupId, userId, 'ADMIN');
         isMember = true;
@@ -1081,7 +1087,10 @@ async function startServer() {
 
       const members = await groupRepo.getMembers(groupId);
       const group = await groupRepo.getById(groupId);
-      let isMember = members.some((m) => m.userId === userId && m.status === 'ACTIVE');
+      const cleanEmail = user.email.toLowerCase().trim();
+      let isMember = members.some((m) =>
+        (m.userId === userId || (m.user?.email && m.user.email.toLowerCase().trim() === cleanEmail)) && m.status === 'ACTIVE'
+      );
       if (!isMember && group && (group.ownerUserId === userId || user.role === 'ADMIN')) {
         await groupRepo.addMember(groupId, userId, 'ADMIN');
         isMember = true;

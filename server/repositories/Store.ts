@@ -611,10 +611,15 @@ export class GroupRepository implements IGroupRepository {
   async getUserGroups(userId: string): Promise<Group[]> {
     const allGroups = dbStore.getData().groups;
     const memberMap = dbStore.getData().groupMembers;
+    const currentUser = dbStore.getData().users[userId];
+    const cleanEmail = currentUser?.email?.toLowerCase().trim();
     const userGroups: Group[] = [];
 
     for (const [groupId, members] of Object.entries(memberMap)) {
-      if (members[userId] && members[userId].status === 'ACTIVE' && allGroups[groupId]) {
+      const isMember = Object.values(members).some((m) =>
+        (m.userId === userId || (cleanEmail && m.user?.email && m.user.email.toLowerCase().trim() === cleanEmail)) && m.status === 'ACTIVE'
+      );
+      if (isMember && allGroups[groupId]) {
         userGroups.push(allGroups[groupId]);
       }
     }
@@ -815,9 +820,24 @@ export class GroupRepository implements IGroupRepository {
       };
     }
 
-    if (pending.length > 0) {
-      dbStore.save();
+    // Also re-key any group members that were seeded or created under this email
+    for (const [gId, membersMap] of Object.entries(dbStore.getData().groupMembers)) {
+      for (const [mUserId, member] of Object.entries(membersMap)) {
+        if (member.user?.email && member.user.email.toLowerCase().trim() === cleanEmail) {
+          if (mUserId !== user.id) {
+            delete membersMap[mUserId];
+          }
+          membersMap[user.id] = {
+            ...member,
+            userId: user.id,
+            user,
+            status: 'ACTIVE',
+          };
+        }
+      }
     }
+
+    dbStore.save();
     return pending.length;
   }
 }

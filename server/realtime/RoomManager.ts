@@ -163,7 +163,10 @@ export class RoomManager {
     }
 
     const members = await groupRepo.getMembers(groupId);
-    const isMember = members.some((m) => m.userId === userId && m.status === 'ACTIVE');
+    const cleanEmail = user.email.toLowerCase().trim();
+    const isMember = members.some((m) =>
+      (m.userId === userId || (m.user?.email && m.user.email.toLowerCase().trim() === cleanEmail)) && m.status === 'ACTIVE'
+    );
     if (!isMember) {
       ws.send(JSON.stringify({ type: 'error', message: 'Must be an active group member to join call' }));
       ws.close();
