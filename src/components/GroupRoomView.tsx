@@ -747,16 +747,6 @@ export const GroupRoomView: React.FC<GroupRoomViewProps> = ({
                       </button>
                     </div>
                   </div>
-
-                  {/* Audio Feedback & Tips */}
-                  <div className="p-3 rounded-xl bg-slate-800/60 border border-slate-700 space-y-2">
-                    <h5 className="font-semibold text-slate-300">Acoustic Echo Prevention</h5>
-                    <ul className="text-[11px] text-slate-400 space-y-1 list-disc list-inside">
-                      <li>Use headphones whenever possible.</li>
-                      <li>Mute when not speaking in noisy rooms.</li>
-                      <li>Sunny immediately pauses audio when you speak.</li>
-                    </ul>
-                  </div>
                 </div>
               )}
             </div>
@@ -764,14 +754,14 @@ export const GroupRoomView: React.FC<GroupRoomViewProps> = ({
         )}
       </div>
 
-      {/* --- Bottom Controls Bar --- */}
-      <footer className="px-6 py-4 bg-slate-900 border-t border-slate-800/90 flex items-center justify-between shrink-0 z-10">
-        {/* Left: Device Mode Indicator */}
-        <div className="hidden sm:flex items-center gap-2 text-xs text-slate-400">
-          <span className="font-medium text-slate-300">Device Mode:</span>
+      {/* --- Bottom Controls Floating Dock --- */}
+      <footer className="px-5 py-3.5 bg-slate-900/90 border-t border-slate-800/80 backdrop-blur shrink-0 flex items-center justify-between z-10">
+        {/* Left: Device Audio Mode Badge */}
+        <div className="hidden sm:flex items-center gap-2">
           <button
             onClick={() => handleSwitchDeviceMode(deviceMode === 'INDIVIDUAL' ? 'SHARED_DEVICE' : 'INDIVIDUAL')}
-            className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-[11px] transition-colors"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800/80 hover:bg-slate-800 text-slate-300 border border-slate-700 text-xs font-semibold transition-colors"
+            title="Toggle Device Mode"
           >
             {deviceMode === 'INDIVIDUAL' ? (
               <>
@@ -938,13 +928,18 @@ const ParticipantTile: React.FC<ParticipantTileProps> = ({
 
   useEffect(() => {
     if (videoRef.current && stream && hasVideo) {
-      videoRef.current.srcObject = stream;
+      if (videoRef.current.srcObject !== stream) {
+        videoRef.current.srcObject = stream;
+      }
+      videoRef.current.play().catch((err) => console.warn('Could not auto-play video:', err));
     }
   }, [stream, hasVideo]);
 
   useEffect(() => {
     if (audioRef.current && stream && !isLocal) {
-      audioRef.current.srcObject = stream;
+      if (audioRef.current.srcObject !== stream) {
+        audioRef.current.srcObject = stream;
+      }
       audioRef.current.play().catch((err) => console.warn('Could not auto-play remote peer audio:', err));
     }
   }, [stream, isLocal]);

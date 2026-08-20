@@ -46,6 +46,7 @@ export class WebRTCRoomService {
   private localMediaStream: MediaStream | null = null;
   private peerConnections: Map<string, RTCPeerConnection> = new Map(); // remoteIdentity -> RTCPeerConnection
   private remoteStreams: Map<string, MediaStream> = new Map(); // remoteIdentity -> MediaStream
+  private pendingCandidates: Map<string, RTCIceCandidateInit[]> = new Map(); // remoteIdentity -> queued ICE candidates
   private participants: Map<string, RoomParticipant> = new Map(); // identity -> RoomParticipant
 
   // Web Audio Contexts
@@ -592,28 +593,72 @@ export class WebRTCRoomService {
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
         { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' },
       ],
     };
 
     const pc = new RTCPeerConnection(config);
     this.peerConnections.set(remoteIdentity, pc);
 
-    // Add local tracks to peer connection
+    // Initialize audio and video transceivers to ensure bidirectional SDP negotiation
+    pc.addTransceiver('audio', { direction: 'sendrecv' });
+    pc.addTransceiver('video', { direction: 'sendrecv' });
+
+    // Attach any existing local audio / video tracks to senders
     if (this.localMediaStream) {
-      this.localMediaStream.getTracks().forEach((track) => {
-        pc.addTrack(track, this.localMediaStream!);
-      });
+      const audioTrack = this.localMediaStream.getAudioTracks()[0];
+      const videoTrack = this.localMediaStream.getVideoTracks()[0];
+
+      if (audioTrack) {
+        const audioSender = pc.getSenders().find((s) => s.track?.kind === 'audio' || (s as any).kind === 'audio');
+        if (audioSender) {
+          audioSender.replaceTrack(audioTrack);
+        } else {
+          pc.addTrack(audioTrack, this.localMediaStream);
+        }
+      }
+
+      if (videoTrack && this.isCameraOn) {
+        const videoSender = pc.getSenders().find((s) => s.track?.kind === 'video' || (s as any).kind === 'video');
+        if (videoSender) {
+          videoSender.replaceTrack(videoTrack);
+        } else {
+          pc.addTrack(videoTrack, this.localMediaStream);
+        }
+      }
     }
 
-    // Handle remote track arrivals
+    // Handle remote track arrivals (audio & video)
     pc.ontrack = (event) => {
-      console.log(`Received remote track from ${remoteIdentity}:`, event.track.kind);
+      console.log(`[WebRTC] Received remote track (${event.track.kind}) from ${remoteIdentity}`);
       let remoteStream = this.remoteStreams.get(remoteIdentity);
       if (!remoteStream) {
         remoteStream = new MediaStream();
         this.remoteStreams.set(remoteIdentity, remoteStream);
       }
+
+      // Avoid duplicate tracks of the same kind
+      const oldTracks = remoteStream.getTracks().filter((t) => t.kind === event.track.kind);
+      oldTracks.forEach((t) => {
+        if (t.id !== event.track.id) remoteStream!.removeTrack(t);
+      });
       remoteStream.addTrack(event.track);
+
+      event.track.onmute = () => {
+        console.log(`[WebRTC] Remote track (${event.track.kind}) muted from ${remoteIdentity}`);
+        this.handlers.onRemoteStream?.(remoteIdentity, remoteStream!);
+      };
+
+      event.track.onunmute = () => {
+        console.log(`[WebRTC] Remote track (${event.track.kind}) unmuted from ${remoteIdentity}`);
+        this.handlers.onRemoteStream?.(remoteIdentity, remoteStream!);
+      };
+
+      event.track.onended = () => {
+        console.log(`[WebRTC] Remote track (${event.track.kind}) ended from ${remoteIdentity}`);
+        remoteStream!.removeTrack(event.track);
+        this.handlers.onRemoteStream?.(remoteIdentity, remoteStream!);
+      };
 
       if (this.handlers.onRemoteStream) {
         this.handlers.onRemoteStream(remoteIdentity, remoteStream);
@@ -659,6 +704,28 @@ export class WebRTCRoomService {
     }
   }
 
+  private async renegotiatePeerConnection(remoteIdentity: string, pc: RTCPeerConnection) {
+    try {
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.send(
+          JSON.stringify({
+            type: 'signal',
+            toParticipantIdentity: remoteIdentity,
+            signalData: {
+              type: 'offer',
+              sdp: pc.localDescription,
+            },
+          })
+        );
+      }
+    } catch (err) {
+      console.warn(`Error renegotiating WebRTC with ${remoteIdentity}:`, err);
+    }
+  }
+
   private async handlePeerSignal(remoteIdentity: string, signalData: any) {
     let pc = this.peerConnections.get(remoteIdentity);
     if (!pc) {
@@ -670,6 +737,8 @@ export class WebRTCRoomService {
     try {
       if (signalData.type === 'offer') {
         await pc.setRemoteDescription(new RTCSessionDescription(signalData.sdp));
+        await this.drainPendingCandidates(remoteIdentity, pc);
+
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
 
@@ -687,11 +756,32 @@ export class WebRTCRoomService {
         }
       } else if (signalData.type === 'answer') {
         await pc.setRemoteDescription(new RTCSessionDescription(signalData.sdp));
+        await this.drainPendingCandidates(remoteIdentity, pc);
       } else if (signalData.type === 'candidate' && signalData.candidate) {
-        await pc.addIceCandidate(new RTCIceCandidate(signalData.candidate));
+        if (pc.remoteDescription && pc.remoteDescription.type) {
+          await pc.addIceCandidate(new RTCIceCandidate(signalData.candidate));
+        } else {
+          const list = this.pendingCandidates.get(remoteIdentity) || [];
+          list.push(signalData.candidate);
+          this.pendingCandidates.set(remoteIdentity, list);
+        }
       }
     } catch (err) {
       console.warn('Error handling WebRTC signal:', err);
+    }
+  }
+
+  private async drainPendingCandidates(remoteIdentity: string, pc: RTCPeerConnection) {
+    const pending = this.pendingCandidates.get(remoteIdentity);
+    if (pending && pending.length > 0) {
+      for (const cand of pending) {
+        try {
+          await pc.addIceCandidate(new RTCIceCandidate(cand));
+        } catch (e) {
+          console.warn('Error adding buffered ICE candidate:', e);
+        }
+      }
+      this.pendingCandidates.delete(remoteIdentity);
     }
   }
 
@@ -701,6 +791,7 @@ export class WebRTCRoomService {
       pc.close();
       this.peerConnections.delete(remoteIdentity);
     }
+    this.pendingCandidates.delete(remoteIdentity);
     this.remoteStreams.delete(remoteIdentity);
     if (this.handlers.onRemoteStreamRemoved) {
       this.handlers.onRemoteStreamRemoved(remoteIdentity);
@@ -734,22 +825,31 @@ export class WebRTCRoomService {
 
     if (enabled) {
       try {
-        // If local stream already has video track, enable it
-        const videoTracks = this.localMediaStream?.getVideoTracks() || [];
-        if (videoTracks.length > 0) {
-          videoTracks.forEach((t) => (t.enabled = true));
+        let videoTrack: MediaStreamTrack | null = null;
+        const existingVideoTracks = this.localMediaStream?.getVideoTracks() || [];
+        if (existingVideoTracks.length > 0 && existingVideoTracks[0].readyState === 'live') {
+          videoTrack = existingVideoTracks[0];
+          videoTrack.enabled = true;
         } else {
-          // Acquire video track
+          // Acquire fresh user camera stream
           const videoStream = await navigator.mediaDevices.getUserMedia({
             video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' },
           });
-          const newVideoTrack = videoStream.getVideoTracks()[0];
-          if (this.localMediaStream && newVideoTrack) {
-            this.localMediaStream.addTrack(newVideoTrack);
+          videoTrack = videoStream.getVideoTracks()[0];
+          if (this.localMediaStream && videoTrack) {
+            this.localMediaStream.addTrack(videoTrack);
+          }
+        }
 
-            // Add track to all peer connections
-            for (const pc of this.peerConnections.values()) {
-              pc.addTrack(newVideoTrack, this.localMediaStream);
+        if (videoTrack) {
+          // Stream video track to all active peer connections
+          for (const [remoteIdentity, pc] of this.peerConnections.entries()) {
+            const videoSender = pc.getSenders().find((s) => s.track?.kind === 'video' || (s as any).kind === 'video');
+            if (videoSender) {
+              await videoSender.replaceTrack(videoTrack);
+            } else {
+              pc.addTrack(videoTrack, this.localMediaStream!);
+              await this.renegotiatePeerConnection(remoteIdentity, pc);
             }
           }
         }
@@ -759,10 +859,23 @@ export class WebRTCRoomService {
         this.handlers.onError?.(`Camera unavailable: ${err.message}`);
       }
     } else {
+      // Disable and stop local video tracks
       if (this.localMediaStream) {
         this.localMediaStream.getVideoTracks().forEach((t) => {
           t.enabled = false;
+          t.stop();
+          this.localMediaStream?.removeTrack(t);
         });
+      }
+
+      // Clear video track on senders for all peers
+      for (const pc of this.peerConnections.values()) {
+        const videoSender = pc.getSenders().find((s) => s.track?.kind === 'video' || (s as any).kind === 'video');
+        if (videoSender) {
+          try {
+            await videoSender.replaceTrack(null);
+          } catch {}
+        }
       }
     }
 

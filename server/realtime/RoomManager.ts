@@ -410,6 +410,24 @@ export class RoomManager {
             break;
           }
 
+          // WebRTC P2P Signaling Relay (Direct Member-to-Member Video & Audio)
+          case 'signal': {
+            const { toParticipantIdentity, signalData } = msg;
+            if (toParticipantIdentity && signalData) {
+              const targetClient = room.clients.get(toParticipantIdentity);
+              if (targetClient && targetClient.ws.readyState === WebSocket.OPEN) {
+                targetClient.ws.send(
+                  JSON.stringify({
+                    type: 'signal',
+                    fromParticipantIdentity: participantIdentity,
+                    signalData,
+                  })
+                );
+              }
+            }
+            break;
+          }
+
           // Admin or host muting/unmuting Sunny in the group call
           case 'set_sunny_mute': {
             const isAuthorized =
