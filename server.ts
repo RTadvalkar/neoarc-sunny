@@ -18,6 +18,7 @@ import {
 import { sendGroupInviteEmail, isSmtpConfigured } from './server/email';
 import { SunnyUser, ProfileTemplate, ProfileField, UserProfileValue, ConversationMode, GroupConversationSession } from './src/types';
 import { RoomManager } from './server/realtime/RoomManager';
+import { SUNNY_COST_CONFIG } from './server/realtime/costConfig';
 
 const PORT = 3000;
 
@@ -1451,9 +1452,27 @@ ${groupMemoriesStr}
       groupId
     );
 
+    let isInterrupted = false;
+    let latestResumptionHandle: string | null = null;
+    let postInterruptionChunks = 0;
+    let postInterruptionBytes = 0;
+
+    const sessionTelemetry = {
+      sessionId: conversationId,
+      mode: 'SOLO',
+      startedAt: Date.now(),
+      turns: 0,
+      interruptions: 0,
+      inputTextTokens: 0,
+      outputTextTokens: 0,
+      totalTokens: 0,
+    };
+
     let session: any = null;
 
     try {
+      console.log(`[SUNNY_CONTEXT_COMPRESSION] Solo Session ${conversationId} configured with trigger: ${SUNNY_COST_CONFIG.triggerTokens}, target: ${SUNNY_COST_CONFIG.targetTokens}`);
+
       session = await ai.live.connect({
         model: 'gemini-3.1-flash-live-preview',
         config: {
@@ -1465,10 +1484,29 @@ ${groupMemoriesStr}
           },
           systemInstruction: systemInstruction,
           tools: sunnyTools,
+          contextWindowCompression: {
+            triggerTokens: SUNNY_COST_CONFIG.triggerTokens,
+            slidingWindow: {
+              targetTokens: SUNNY_COST_CONFIG.targetTokens,
+            },
+          },
+          ...(latestResumptionHandle ? { sessionResumption: { handle: latestResumptionHandle } } : {}),
         },
         callbacks: {
           onmessage: async (message: any) => {
             if (clientWs.readyState !== WebSocket.OPEN) return;
+
+            // Session Resumption Handle Update
+            if (message.sessionResumptionUpdate?.handle || message.sessionResumption?.handle) {
+              latestResumptionHandle = message.sessionResumptionUpdate?.handle || message.sessionResumption?.handle;
+            }
+
+            // Usage Metadata Telemetry
+            if (message.usageMetadata) {
+              sessionTelemetry.inputTextTokens = message.usageMetadata.promptTokenCount || sessionTelemetry.inputTextTokens;
+              sessionTelemetry.outputTextTokens = message.usageMetadata.candidatesTokenCount || sessionTelemetry.outputTextTokens;
+              sessionTelemetry.totalTokens = message.usageMetadata.totalTokenCount || sessionTelemetry.totalTokens;
+            }
 
             // Handle Tool Calls
             if (message.toolCall) {
@@ -1591,15 +1629,30 @@ ${groupMemoriesStr}
               }
             }
 
-            // Audio from Sunny
+            // Interruption signal from Gemini
+            if (message.serverContent?.interrupted) {
+              const now = Date.now();
+              isInterrupted = true;
+              sessionTelemetry.interruptions++;
+              console.log(`[Solo/Interruption] serverContent.interrupted received at ${new Date(now).toISOString()}`);
+              clientWs.send(JSON.stringify({ type: 'interrupted' }));
+            }
+
+            // Audio from Sunny (Discard if interrupted!)
             const audioData = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
             if (audioData) {
+              if (isInterrupted) {
+                postInterruptionChunks++;
+                postInterruptionBytes += audioData.length * 0.75;
+                // Discard post-interruption audio frames
+                return;
+              }
               clientWs.send(JSON.stringify({ type: 'audio', audio: audioData }));
             }
 
             // Text transcription from Sunny
             const textContent = message.serverContent?.modelTurn?.parts?.[0]?.text;
-            if (textContent) {
+            if (textContent && !isInterrupted) {
               await conversationRepo.addUtterance(conversationId, {
                 conversationId,
                 speakerType: 'sunny',
@@ -1619,13 +1672,10 @@ ${groupMemoriesStr}
               );
             }
 
-            // Interruption signal
-            if (message.serverContent?.interrupted) {
-              clientWs.send(JSON.stringify({ type: 'interrupted' }));
-            }
-
             // Turn complete
-            if (message.serverContent?.turnComplete) {
+            if (message.serverContent?.turnComplete || message.serverContent?.generationComplete) {
+              isInterrupted = false;
+              sessionTelemetry.turns++;
               clientWs.send(JSON.stringify({ type: 'turnComplete' }));
             }
           },

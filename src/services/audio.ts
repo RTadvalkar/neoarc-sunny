@@ -139,6 +139,13 @@ export class AudioController {
   }
 
   /**
+   * Alias for clearSunnyPlaybackQueue
+   */
+  public clearSunnyPlaybackQueue(): void {
+    this.stopPlayback();
+  }
+
+  /**
    * Cleanup resources when closing session
    */
   public stopAll(): void {

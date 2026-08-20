@@ -14,6 +14,7 @@ import {
   groupRepo,
   userRepo,
 } from '../repositories';
+import { SUNNY_COST_CONFIG } from './costConfig';
 
 // AI Tool definitions for Sunny in Group Room
 const sunnyGroupTools = [
@@ -28,33 +29,33 @@ const sunnyGroupTools = [
           properties: {
             personName: {
               type: Type.STRING,
-              description: 'Name of the member if known from authenticated track, or "Group"',
+              description: 'Name of the person who shared this memory/preference (e.g. "Nakul", "Rushi"), or "Group"',
             },
             subject: {
               type: Type.STRING,
-              description: 'Short topic or subject (e.g., Goa Trip, Startup Idea, Work Transition)',
+              description: 'Topic/category of memory (e.g. "Weekend Plans", "Travel Preference", "Work Update")',
             },
             fact: {
               type: Type.STRING,
-              description: 'The specific fact, plan, or preference learned from the conversation',
+              description: 'Concise, clear fact or preference learned in the conversation',
             },
             context: {
               type: Type.STRING,
-              description: 'Brief context of when/how it was discussed',
+              description: 'Context where this fact was stated',
             },
             memoryType: {
               type: Type.STRING,
-              enum: ['PREFERENCE', 'PLAN', 'FACT', 'RELATIONSHIP', 'BACKGROUND'],
-              description: 'Categorization of this memory',
+              enum: ['FACT', 'PREFERENCE', 'BACKGROUND', 'GOAL', 'RELATIONSHIP', 'EVENT'],
+              description: 'Classification of memory',
             },
           },
-          required: ['subject', 'fact'],
+          required: ['fact', 'subject'],
         },
       },
       {
         name: 'save_highlight',
         description:
-          'Capture an important discussion highlight, major group decision, or key action item from the active group call.',
+          'Save an important group decision, key insight, or notable discussion highlight from this circle call.',
         parameters: {
           type: Type.OBJECT,
           properties: {
@@ -65,7 +66,7 @@ const sunnyGroupTools = [
             },
             text: {
               type: Type.STRING,
-              description: 'Concise summary of the highlight or decision in Marathi / English',
+              description: 'Concise summary of the highlight or decision',
             },
             importance: {
               type: Type.STRING,
@@ -130,6 +131,25 @@ export class SunnyRoomController {
   private reconnectAttempts: number = 0;
   private reconnectTimer: NodeJS.Timeout | null = null;
 
+  // Interruption & Post-Interruption Telemetry
+  private isInterrupted: boolean = false;
+  private postInterruptionAudioChunkCount: number = 0;
+  private postInterruptionAudioBytes: number = 0;
+  private postInterruptionAudioDurationMs: number = 0;
+  private sessionResumptionHandle: string | null = null;
+
+  // Session Cost Telemetry
+  private telemetry = {
+    sessionId: '',
+    conversationId: '',
+    startedAt: Date.now(),
+    turns: 0,
+    interruptions: 0,
+    inputTextTokens: 0,
+    outputTextTokens: 0,
+    totalTokens: 0,
+  };
+
   // Turn Latency Metrics & Watchdog
   private turnMetrics: {
     speaker: string;
@@ -162,6 +182,8 @@ export class SunnyRoomController {
     this.conversationId = session.conversationId;
     this.ai = aiClient;
     this.callbacks = callbacks;
+    this.telemetry.sessionId = session.id;
+    this.telemetry.conversationId = session.conversationId;
   }
 
   public async start() {
@@ -181,6 +203,28 @@ export class SunnyRoomController {
       } catch {}
       this.geminiSession = null;
     }
+  }
+
+  public getSessionDiagnostics() {
+    const durationMin = ((Date.now() - this.telemetry.startedAt) / 60000).toFixed(1);
+    return {
+      sessionId: this.sessionId,
+      conversationId: this.conversationId,
+      duration: `${durationMin}m`,
+      turns: this.telemetry.turns,
+      interruptions: this.telemetry.interruptions,
+      postInterruptionDiscardedChunks: this.postInterruptionAudioChunkCount,
+      postInterruptionDiscardedBytes: Math.round(this.postInterruptionAudioBytes),
+      compressionPolicy: {
+        triggerTokens: SUNNY_COST_CONFIG.triggerTokens,
+        targetTokens: SUNNY_COST_CONFIG.targetTokens,
+      },
+      tokens: {
+        input: this.telemetry.inputTextTokens,
+        output: this.telemetry.outputTextTokens,
+        total: this.telemetry.totalTokens,
+      },
+    };
   }
 
   private async buildSystemInstruction(): Promise<string> {
@@ -243,6 +287,8 @@ ${groupMemoriesStr}
     try {
       const systemInstruction = await this.buildSystemInstruction();
 
+      console.log(`[SUNNY_CONTEXT_COMPRESSION] Group Room Session ${this.sessionId} configured with trigger: ${SUNNY_COST_CONFIG.triggerTokens}, target: ${SUNNY_COST_CONFIG.targetTokens}`);
+
       this.geminiSession = await this.ai.live.connect({
         model: 'gemini-3.1-flash-live-preview',
         config: {
@@ -254,10 +300,29 @@ ${groupMemoriesStr}
           },
           systemInstruction,
           tools: sunnyGroupTools,
+          contextWindowCompression: {
+            triggerTokens: SUNNY_COST_CONFIG.triggerTokens,
+            slidingWindow: {
+              targetTokens: SUNNY_COST_CONFIG.targetTokens,
+            },
+          },
+          ...(this.sessionResumptionHandle ? { sessionResumption: { handle: this.sessionResumptionHandle } } : {}),
         },
         callbacks: {
           onmessage: async (message: any) => {
             if (this.isDestroyed) return;
+
+            // Session Resumption Handle Update
+            if (message.sessionResumptionUpdate?.handle || message.sessionResumption?.handle) {
+              this.sessionResumptionHandle = message.sessionResumptionUpdate?.handle || message.sessionResumption?.handle;
+            }
+
+            // Usage Metadata Telemetry
+            if (message.usageMetadata) {
+              this.telemetry.inputTextTokens = message.usageMetadata.promptTokenCount || this.telemetry.inputTextTokens;
+              this.telemetry.outputTextTokens = message.usageMetadata.candidatesTokenCount || this.telemetry.outputTextTokens;
+              this.telemetry.totalTokens = message.usageMetadata.totalTokenCount || this.telemetry.totalTokens;
+            }
 
             // Handle tool calls (save_memory, save_highlight)
             if (message.toolCall) {
@@ -316,6 +381,18 @@ ${groupMemoriesStr}
               }
             }
 
+            // Native Interruption Signal from Gemini Live
+            if (message.serverContent?.interrupted) {
+              const now = Date.now();
+              this.isInterrupted = true;
+              this.telemetry.interruptions++;
+              this.turnState = 'INTERRUPTED';
+              this.clearLatencyWatchdog();
+
+              console.log(`[Group/Interruption] serverContent.interrupted received at ${new Date(now).toISOString()}`);
+              this.callbacks.broadcastInterruption();
+            }
+
             // Handle audio output from Sunny
             if (message.serverContent) {
               const now = Date.now();
@@ -323,6 +400,14 @@ ${groupMemoriesStr}
               if (modelTurn && modelTurn.parts) {
                 for (const part of modelTurn.parts) {
                   if (part.inlineData && part.inlineData.data) {
+                    // If turn was interrupted, discard post-interruption audio frames immediately
+                    if (this.isInterrupted) {
+                      this.postInterruptionAudioChunkCount++;
+                      this.postInterruptionAudioBytes += part.inlineData.data.length * 0.75;
+                      this.postInterruptionAudioDurationMs += 32;
+                      return;
+                    }
+
                     // Turn state transition to SUNNY_SPEAKING
                     if (this.turnState !== 'SUNNY_SPEAKING') {
                       this.turnState = 'SUNNY_SPEAKING';
@@ -362,7 +447,7 @@ ${groupMemoriesStr}
                     this.updateStatus('speaking');
                     this.callbacks.broadcastSunnyAudio(part.inlineData.data);
                   }
-                  if (part.text) {
+                  if (part.text && !this.isInterrupted) {
                     this.callbacks.broadcastSunnyTranscript(part.text, 'sunny');
                     // Persist utterance
                     await conversationRepo.addUtterance(this.conversationId, {
@@ -377,8 +462,10 @@ ${groupMemoriesStr}
                 }
               }
 
-              if (message.serverContent.turnComplete) {
+              if (message.serverContent.turnComplete || message.serverContent.generationComplete) {
                 this.turnState = 'IDLE';
+                this.isInterrupted = false;
+                this.telemetry.turns++;
                 this.updateStatus('listening');
                 this.conversationalState = 'NO_HUMAN_SPEAKING';
                 this.clearLatencyWatchdog();
@@ -517,22 +604,13 @@ ${groupMemoriesStr}
   }
 
   public interruptSunny() {
+    this.isInterrupted = true;
     this.turnState = 'INTERRUPTED';
+    this.telemetry.interruptions++;
     this.clearLatencyWatchdog();
     this.conversationalState = 'ONE_HUMAN_SPEAKING';
     this.updateStatus('listening');
     this.callbacks.broadcastInterruption();
-
-    // Notify Gemini of interruption
-    if (this.geminiSession) {
-      try {
-        this.geminiSession.sendRealtimeInput({
-          text: '[INTERRUPTED: Human is speaking now. Stop previous turn.]',
-        });
-      } catch (e) {
-        console.warn('Could not send interruption to Gemini:', e);
-      }
-    }
   }
 
   // Handle single-active speaker gated audio forwarding to Gemini Live
