@@ -848,12 +848,20 @@ const ParticipantTile: React.FC<ParticipantTileProps> = ({
   isLocal,
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const audioRef = useRef<HTMLAudioElement>(null);
 
   useEffect(() => {
-    if (videoRef.current && stream) {
+    if (videoRef.current && stream && hasVideo) {
       videoRef.current.srcObject = stream;
     }
   }, [stream, hasVideo]);
+
+  useEffect(() => {
+    if (audioRef.current && stream && !isLocal) {
+      audioRef.current.srcObject = stream;
+      audioRef.current.play().catch((err) => console.warn('Could not auto-play remote peer audio:', err));
+    }
+  }, [stream, isLocal]);
 
   return (
     <div
@@ -863,6 +871,11 @@ const ParticipantTile: React.FC<ParticipantTileProps> = ({
           : 'border-slate-800'
       }`}
     >
+      {/* Remote Peer Audio Player */}
+      {!isLocal && stream && (
+        <audio ref={audioRef} autoPlay playsInline />
+      )}
+
       {/* Video Track Display (if camera active) */}
       {hasVideo ? (
         <video

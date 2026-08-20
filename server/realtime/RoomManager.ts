@@ -301,13 +301,25 @@ export class RoomManager {
             break;
           }
 
-          // Audio chunk sent to Sunny for AI listening & attribution
+          // Audio chunk sent to Sunny for AI listening & attribution, and bridged to other participants
           case 'audio_human': {
             if (msg.audio) {
               await room.sunnyController.handleHumanAudio(
                 participantIdentity,
                 msg.audio,
                 client.deviceMode
+              );
+
+              // Broadcast human audio to other participants in the room
+              this.broadcastToRoom(
+                room.roomId,
+                {
+                  type: 'audio_peer',
+                  fromParticipantIdentity: participantIdentity,
+                  displayName: client.displayName,
+                  audio: msg.audio,
+                },
+                participantIdentity // exclude sender
               );
             }
             break;

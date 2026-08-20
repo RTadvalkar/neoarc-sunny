@@ -407,6 +407,17 @@ export class WebRTCRoomService {
         break;
       }
 
+      case 'audio_peer': {
+        if (msg.audio && msg.fromParticipantIdentity !== this.localIdentity) {
+          // Play remote human peer audio directly via Web Audio if P2P stream is not active
+          const hasDirectMediaStream = this.remoteStreams.has(msg.fromParticipantIdentity);
+          if (!hasDirectMediaStream) {
+            this.playPeerAudioChunk(msg.audio);
+          }
+        }
+        break;
+      }
+
       case 'sunny_status': {
         const sunny = this.participants.get('sunny-agent');
         if (sunny) {
@@ -729,6 +740,22 @@ export class WebRTCRoomService {
       };
     } catch (err) {
       console.error('Error playing Sunny audio chunk:', err);
+    }
+  }
+
+  private playPeerAudioChunk(base64Pcm: string) {
+    if (!this.outputAudioCtx) return;
+    try {
+      const float32Array = this.base64PcmToFloat32(base64Pcm);
+      const audioBuffer = this.outputAudioCtx.createBuffer(1, float32Array.length, 16000);
+      audioBuffer.getChannelData(0).set(float32Array);
+
+      const source = this.outputAudioCtx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(this.outputAudioCtx.destination);
+      source.start();
+    } catch (err) {
+      console.error('Error playing peer audio chunk:', err);
     }
   }
 
