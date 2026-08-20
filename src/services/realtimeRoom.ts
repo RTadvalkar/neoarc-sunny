@@ -60,6 +60,13 @@ export class WebRTCRoomService {
   private vadInterval: any = null;
   private isCurrentlySpeaking: boolean = false;
   private speakingDebounceTimer: any = null;
+  private speakerSpeechStartAt: number = 0;
+  private speakerSpeechEndAt: number = 0;
+  private firstPcmCapturedAt: number = 0;
+  private lastPcmCapturedAt: number = 0;
+  private firstPcmSentToServerAt: number = 0;
+  private lastPcmSentToServerAt: number = 0;
+  private preRollBuffer: string[] = [];
 
   // Reconnection
   private isIntentionalDisconnect: boolean = false;
@@ -147,21 +154,64 @@ export class WebRTCRoomService {
       this.analyserNode.fftSize = 512;
       this.analyserNode.smoothingTimeConstant = 0.4;
 
-      this.scriptProcessor = this.inputAudioCtx.createScriptProcessor(2048, 1, 1);
+      // 512 samples @ 16kHz = exactly 32ms chunk duration (1024 bytes PCM)
+      this.scriptProcessor = this.inputAudioCtx.createScriptProcessor(512, 1, 1);
 
       this.scriptProcessor.onaudioprocess = (e) => {
         if (this.isMuted || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
 
         const inputData = e.inputBuffer.getChannelData(0);
         const pcm16Base64 = this.float32ToInt16Base64(inputData);
-        if (pcm16Base64) {
-          // Send audio chunk to server for Sunny's AI tap
+        if (!pcm16Base64) return;
+
+        const now = Date.now();
+        this.lastPcmCapturedAt = now;
+
+        // Check WebSocket backpressure (shed stale frames if network buffer exceeds ~300ms / 32KB)
+        if (this.ws.bufferedAmount > 32768) {
+          console.warn(`[VAD/Realtime] WebSocket backpressure high (${this.ws.bufferedAmount} bytes). Dropping PCM frame to preserve realtime latency.`);
+          return;
+        }
+
+        // Only transmit audio to Sunny when the user is speaking (No continuous silence transmission!)
+        if (this.isCurrentlySpeaking) {
+          // Flush pre-roll chunks captured just before VAD threshold triggered
+          if (this.preRollBuffer.length > 0) {
+            for (const preChunk of this.preRollBuffer) {
+              this.ws.send(
+                JSON.stringify({
+                  type: 'audio_human',
+                  audio: preChunk,
+                  capturedAt: now - 32,
+                  sentAt: now,
+                  chunkDurationMs: 32,
+                  chunkBytes: 1024,
+                })
+              );
+            }
+            this.preRollBuffer = [];
+          }
+
+          if (!this.firstPcmCapturedAt) this.firstPcmCapturedAt = now;
+          if (!this.firstPcmSentToServerAt) this.firstPcmSentToServerAt = now;
+          this.lastPcmSentToServerAt = now;
+
           this.ws.send(
             JSON.stringify({
               type: 'audio_human',
               audio: pcm16Base64,
+              capturedAt: now,
+              sentAt: now,
+              chunkDurationMs: 32,
+              chunkBytes: 1024,
             })
           );
+        } else {
+          // Maintain a 2-chunk (~64ms) pre-roll buffer to preserve the first spoken syllable
+          this.preRollBuffer.push(pcm16Base64);
+          if (this.preRollBuffer.length > 2) {
+            this.preRollBuffer.shift();
+          }
         }
       };
 
@@ -211,21 +261,62 @@ export class WebRTCRoomService {
           this.speakingDebounceTimer = setTimeout(() => {
             this.setIsSpeaking(false);
             this.speakingDebounceTimer = null;
-          }, 400); // 400ms smoothing delay
+          }, 350); // 350ms end-of-speech debounce
         }
       }
-    }, 100);
+    }, 50); // 50ms polling for responsive speech boundaries
   }
 
   private setIsSpeaking(isSpeaking: boolean) {
-    this.isCurrentlySpeaking = isSpeaking;
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(
-        JSON.stringify({
-          type: 'speaking',
-          isSpeaking,
-        })
-      );
+    const now = Date.now();
+    if (isSpeaking && !this.isCurrentlySpeaking) {
+      this.isCurrentlySpeaking = true;
+      this.speakerSpeechStartAt = now;
+      this.firstPcmCapturedAt = 0;
+      this.firstPcmSentToServerAt = 0;
+      console.log(`[VAD] Speech STARTED at ${new Date(now).toISOString()}`);
+
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.send(
+          JSON.stringify({
+            type: 'speaking',
+            isSpeaking: true,
+            speakerSpeechStartAt: now,
+          })
+        );
+      }
+    } else if (!isSpeaking && this.isCurrentlySpeaking) {
+      this.isCurrentlySpeaking = false;
+      this.speakerSpeechEndAt = now;
+      this.preRollBuffer = [];
+      const speechDuration = now - this.speakerSpeechStartAt;
+      console.log(`[VAD] Speech ENDED at ${new Date(now).toISOString()} (Duration: ${speechDuration}ms). Sending audio_stream_end to server.`);
+
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        // Send speaking false indicator
+        this.ws.send(
+          JSON.stringify({
+            type: 'speaking',
+            isSpeaking: false,
+            speakerSpeechEndAt: now,
+          })
+        );
+
+        // Send explicit audio_stream_end for Gemini Live turn finalization
+        this.ws.send(
+          JSON.stringify({
+            type: 'audio_stream_end',
+            timestamps: {
+              speakerSpeechStartAt: this.speakerSpeechStartAt,
+              speakerSpeechEndAt: now,
+              firstPcmCapturedAt: this.firstPcmCapturedAt,
+              lastPcmCapturedAt: this.lastPcmCapturedAt,
+              firstPcmSentToServerAt: this.firstPcmSentToServerAt,
+              lastPcmSentToServerAt: this.lastPcmSentToServerAt,
+            },
+          })
+        );
+      }
     }
 
     // Update local participant state in UI
@@ -718,6 +809,11 @@ export class WebRTCRoomService {
     if (!this.outputAudioCtx) return;
 
     try {
+      const now = Date.now();
+      if (this.activeSunnySources.length === 0) {
+        console.log(`[Sunny/Audio] Sunny audible playback STARTED at ${new Date(now).toISOString()}`);
+      }
+
       const float32Array = this.base64PcmToFloat32(base64Pcm);
       const audioBuffer = this.outputAudioCtx.createBuffer(1, float32Array.length, 24000);
       audioBuffer.getChannelData(0).set(float32Array);

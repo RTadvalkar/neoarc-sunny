@@ -86,6 +86,14 @@ export type ConversationalState =
   | 'MULTIPLE_HUMANS_SPEAKING'
   | 'SUNNY_SPEAKING';
 
+export type GeminiTurnState =
+  | 'IDLE'
+  | 'HUMAN_SPEAKING'
+  | 'FINALIZING_HUMAN_TURN'
+  | 'WAITING_FOR_GEMINI'
+  | 'SUNNY_SPEAKING'
+  | 'INTERRUPTED';
+
 export interface RoomBroadcastCallbacks {
   broadcastSunnyAudio: (pcmBase64: string) => void;
   broadcastSunnyStatus: (status: 'idle' | 'listening' | 'thinking' | 'speaking' | 'reconnecting') => void;
@@ -106,6 +114,12 @@ export class SunnyRoomController {
   private isDestroyed: boolean = false;
   private currentStatus: 'idle' | 'listening' | 'thinking' | 'speaking' | 'reconnecting' = 'listening';
 
+  // State Machine & Single Active Speaker Gate
+  private turnState: GeminiTurnState = 'IDLE';
+  private activeGeminiSpeakerIdentity: string | null = null;
+  private currentSpeakerName: string = '';
+  private isSpeakerContextSentForCurrentTurn: boolean = false;
+
   private activeSpeakers: Set<string> = new Set();
   private recentSpeakerIdentity: { userId?: string; displayName?: string; identitySource: 'RTC_PARTICIPANT' | 'SHARED_MIC' } | null = null;
   private conversationalState: ConversationalState = 'NO_HUMAN_SPEAKING';
@@ -115,6 +129,28 @@ export class SunnyRoomController {
   private utteranceSeq: number = 0;
   private reconnectAttempts: number = 0;
   private reconnectTimer: NodeJS.Timeout | null = null;
+
+  // Turn Latency Metrics & Watchdog
+  private turnMetrics: {
+    speaker: string;
+    speakerIdentity: string;
+    speakerSpeechStartAt: number;
+    speakerSpeechEndAt: number;
+    firstPcmCapturedAt: number;
+    lastPcmCapturedAt: number;
+    firstPcmSentToServerAt: number;
+    lastPcmSentToServerAt: number;
+    firstPcmReceivedBySunnyControllerAt: number;
+    lastPcmReceivedBySunnyControllerAt: number;
+    audioStreamEndSentAt: number;
+    geminiFirstAudioSentAt: number;
+    geminiLastAudioSentAt: number;
+    geminiResponseStartedAt: number;
+    geminiFirstResponseAudioAt: number;
+    pcmChunksForwarded: number;
+    pcmBytesForwarded: number;
+  } | null = null;
+  private latencyWatchdogTimer: NodeJS.Timeout | null = null;
 
   constructor(
     session: GroupConversationSession,
@@ -134,6 +170,7 @@ export class SunnyRoomController {
 
   public async destroy() {
     this.isDestroyed = true;
+    this.clearLatencyWatchdog();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -224,6 +261,7 @@ ${groupMemoriesStr}
 
             // Handle tool calls (save_memory, save_highlight)
             if (message.toolCall) {
+              const responses: any[] = [];
               for (const call of message.toolCall.functionCalls) {
                 if (call.name === 'save_memory') {
                   const args = call.args as any;
@@ -245,20 +283,11 @@ ${groupMemoriesStr}
                   });
 
                   this.callbacks.broadcastMemorySaved(saved);
-
-                  // Acknowledge tool call to Gemini
-                  try {
-                    this.geminiSession.sendToolResponse({
-                      functionResponses: [
-                        {
-                          response: { output: { success: true, memoryId: saved.id } },
-                          id: call.id,
-                        },
-                      ],
-                    });
-                  } catch (e) {
-                    console.error('Error sending toolResponse:', e);
-                  }
+                  responses.push({
+                    id: call.id,
+                    name: call.name,
+                    response: { result: 'Memory saved successfully in storage' },
+                  });
                 } else if (call.name === 'save_highlight') {
                   const args = call.args as any;
                   const saved = await conversationRepo.addHighlight(this.conversationId, {
@@ -268,38 +297,69 @@ ${groupMemoriesStr}
                   });
 
                   this.callbacks.broadcastHighlightSaved(saved);
+                  responses.push({
+                    id: call.id,
+                    name: call.name,
+                    response: { result: 'Highlight captured successfully' },
+                  });
+                }
+              }
 
-                  try {
-                    this.geminiSession.sendToolResponse({
-                      functionResponses: [
-                        {
-                          response: { output: { success: true, highlightId: saved.id } },
-                          id: call.id,
-                        },
-                      ],
-                    });
-                  } catch (e) {
-                    console.error('Error sending toolResponse:', e);
-                  }
+              if (responses.length > 0 && this.geminiSession) {
+                try {
+                  this.geminiSession.sendToolResponse({
+                    functionResponses: responses,
+                  });
+                } catch (e) {
+                  console.error('Error sending toolResponse:', e);
                 }
               }
             }
 
             // Handle audio output from Sunny
             if (message.serverContent) {
+              const now = Date.now();
               const modelTurn = message.serverContent.modelTurn;
               if (modelTurn && modelTurn.parts) {
                 for (const part of modelTurn.parts) {
                   if (part.inlineData && part.inlineData.data) {
+                    // Turn state transition to SUNNY_SPEAKING
+                    if (this.turnState !== 'SUNNY_SPEAKING') {
+                      this.turnState = 'SUNNY_SPEAKING';
+                      this.clearLatencyWatchdog();
+
+                      if (this.turnMetrics && !this.turnMetrics.geminiFirstResponseAudioAt) {
+                        this.turnMetrics.geminiResponseStartedAt = now;
+                        this.turnMetrics.geminiFirstResponseAudioAt = now;
+
+                        // Calculate detailed end-to-end latency breakdown
+                        const speechEnd = this.turnMetrics.speakerSpeechEndAt || this.turnMetrics.lastPcmCapturedAt;
+                        const captureLatency = Math.max(0, this.turnMetrics.firstPcmSentToServerAt - this.turnMetrics.firstPcmCapturedAt);
+                        const networkLatency = Math.max(0, this.turnMetrics.firstPcmReceivedBySunnyControllerAt - this.turnMetrics.firstPcmSentToServerAt);
+                        const geminiResponseLatency = Math.max(0, now - (this.turnMetrics.audioStreamEndSentAt || speechEnd));
+                        const totalEndToEndLatency = Math.max(0, now - speechEnd);
+
+                        console.log(`\n==================================================`);
+                        console.log(`[SUNNY_TURN_LATENCY_METRICS] Spoken Turn Completed`);
+                        console.log(`Speaker:                     ${this.turnMetrics.speaker}`);
+                        console.log(`Speech Duration:             ${Math.max(0, this.turnMetrics.speakerSpeechEndAt - this.turnMetrics.speakerSpeechStartAt)}ms`);
+                        console.log(`Chunks Forwarded:            ${this.turnMetrics.pcmChunksForwarded} (~32ms/chunk, ${Math.round(this.turnMetrics.pcmBytesForwarded)} bytes)`);
+                        console.log(`Capture Latency:             ${captureLatency}ms`);
+                        console.log(`Network Ingress Latency:     ${networkLatency}ms`);
+                        console.log(`Gemini Live Response Delay:  ${geminiResponseLatency}ms`);
+                        console.log(`TOTAL End-to-End Latency:    ${totalEndToEndLatency}ms (${(totalEndToEndLatency / 1000).toFixed(2)}s)`);
+                        console.log(`==================================================\n`);
+                      }
+                    }
+
                     // Check if interrupted by human speech
                     if (this.conversationalState === 'ONE_HUMAN_SPEAKING' || this.conversationalState === 'MULTIPLE_HUMANS_SPEAKING') {
-                      console.log('Human spoke while Sunny producing audio -> Interrupted');
+                      console.log('[Sunny/Turn] Human spoke while Sunny producing audio -> Interrupted');
                       this.interruptSunny();
                       return;
                     }
 
                     this.updateStatus('speaking');
-                    this.conversationalState = 'SUNNY_SPEAKING';
                     this.callbacks.broadcastSunnyAudio(part.inlineData.data);
                   }
                   if (part.text) {
@@ -318,8 +378,10 @@ ${groupMemoriesStr}
               }
 
               if (message.serverContent.turnComplete) {
+                this.turnState = 'IDLE';
                 this.updateStatus('listening');
                 this.conversationalState = 'NO_HUMAN_SPEAKING';
+                this.clearLatencyWatchdog();
               }
             }
           },
@@ -336,6 +398,7 @@ ${groupMemoriesStr}
 
       this.reconnectAttempts = 0;
       this.isConnecting = false;
+      this.turnState = 'IDLE';
       this.updateStatus('listening');
       console.log(`Sunny joined group room session ${this.sessionId}`);
 
@@ -357,6 +420,7 @@ ${groupMemoriesStr}
   private handleGeminiDisconnect() {
     if (this.isDestroyed) return;
     this.geminiSession = null;
+    this.clearLatencyWatchdog();
     this.updateStatus('reconnecting');
 
     // Exponential backoff reconnect
@@ -379,7 +443,6 @@ ${groupMemoriesStr}
   public onParticipantJoined(participant: RoomParticipant) {
     this.participants.set(participant.identity, participant);
     if (!participant.isAI && this.geminiSession) {
-      // Send conversational context event to Gemini
       try {
         this.geminiSession.sendRealtimeInput({
           text: `[EVENT: PARTICIPANT_JOINED: ${participant.displayName} (Device: ${participant.deviceMode})]`,
@@ -395,6 +458,10 @@ ${groupMemoriesStr}
     this.participants.delete(identity);
     this.activeSpeakers.delete(identity);
 
+    if (this.activeGeminiSpeakerIdentity === identity) {
+      this.handleAudioStreamEnd(identity);
+    }
+
     if (p && !p.isAI && this.geminiSession) {
       try {
         this.geminiSession.sendRealtimeInput({
@@ -406,7 +473,12 @@ ${groupMemoriesStr}
     }
   }
 
-  public onParticipantSpeakingChanged(identity: string, isSpeaking: boolean) {
+  public onParticipantSpeakingChanged(
+    identity: string,
+    isSpeaking: boolean,
+    speechStartAt?: number,
+    speechEndAt?: number
+  ) {
     if (isSpeaking) {
       this.activeSpeakers.add(identity);
     } else {
@@ -416,40 +488,27 @@ ${groupMemoriesStr}
     const humanSpeakingCount = Array.from(this.activeSpeakers).filter((id) => id !== 'sunny-agent').length;
 
     if (humanSpeakingCount === 0) {
-      if (this.conversationalState !== 'SUNNY_SPEAKING') {
+      // If the active speaker stopped speaking, finalize turn
+      if (this.activeGeminiSpeakerIdentity === identity || this.turnState === 'HUMAN_SPEAKING') {
+        this.handleAudioStreamEnd(identity, {
+          speakerSpeechStartAt: speechStartAt,
+          speakerSpeechEndAt: speechEndAt || Date.now(),
+        });
+      }
+
+      if (this.turnState !== 'SUNNY_SPEAKING' && this.turnState !== 'WAITING_FOR_GEMINI' && this.turnState !== 'FINALIZING_HUMAN_TURN') {
         this.conversationalState = 'NO_HUMAN_SPEAKING';
         this.updateStatus('listening');
       }
     } else if (humanSpeakingCount === 1) {
-      // If Sunny was speaking, interrupt immediately!
-      if (this.conversationalState === 'SUNNY_SPEAKING') {
+      if (this.turnState === 'SUNNY_SPEAKING') {
         this.interruptSunny();
       }
       this.conversationalState = 'ONE_HUMAN_SPEAKING';
       this.updateStatus('listening');
-
-      // Update speaker context
-      const speakerId = Array.from(this.activeSpeakers).find((id) => id !== 'sunny-agent');
-      if (speakerId) {
-        const participant = this.participants.get(speakerId);
-        if (participant) {
-          if (participant.deviceMode === 'INDIVIDUAL' && participant.sunnyUserId) {
-            this.recentSpeakerIdentity = {
-              userId: participant.sunnyUserId,
-              displayName: participant.displayName,
-              identitySource: 'RTC_PARTICIPANT',
-            };
-          } else {
-            this.recentSpeakerIdentity = {
-              displayName: 'Group',
-              identitySource: 'SHARED_MIC',
-            };
-          }
-        }
-      }
     } else {
       // Multiple humans speaking -> Overlapping speech -> Sunny stays silent
-      if (this.conversationalState === 'SUNNY_SPEAKING') {
+      if (this.turnState === 'SUNNY_SPEAKING') {
         this.interruptSunny();
       }
       this.conversationalState = 'MULTIPLE_HUMANS_SPEAKING';
@@ -458,6 +517,8 @@ ${groupMemoriesStr}
   }
 
   public interruptSunny() {
+    this.turnState = 'INTERRUPTED';
+    this.clearLatencyWatchdog();
     this.conversationalState = 'ONE_HUMAN_SPEAKING';
     this.updateStatus('listening');
     this.callbacks.broadcastInterruption();
@@ -474,36 +535,105 @@ ${groupMemoriesStr}
     }
   }
 
-  // Receive human audio stream chunk from client with speaker metadata
+  // Handle single-active speaker gated audio forwarding to Gemini Live
   public async handleHumanAudio(
     speakerIdentity: string,
     pcmBase64: string,
-    deviceMode: 'INDIVIDUAL' | 'SHARED_DEVICE'
+    deviceMode: 'INDIVIDUAL' | 'SHARED_DEVICE',
+    clientCapturedAt?: number,
+    clientSentAt?: number
   ) {
     if (!this.geminiSession || this.isDestroyed) return;
 
-    // Determine speaker attribution context
-    const participant = this.participants.get(speakerIdentity);
-    const displayName = participant?.displayName || 'Friend';
+    const now = Date.now();
 
-    let speakerTag = '';
-    if (deviceMode === 'INDIVIDUAL' && participant?.sunnyUserId) {
-      speakerTag = `[CURRENT_SPEAKER: "${displayName}" (RTC_PARTICIPANT)]`;
-      this.recentSpeakerIdentity = {
-        userId: participant.sunnyUserId,
-        displayName: participant.displayName,
-        identitySource: 'RTC_PARTICIPANT',
+    // 1. Single Active Speaker Gate Check
+    if (this.activeGeminiSpeakerIdentity === null) {
+      // First speaker acquires active gate
+      this.activeGeminiSpeakerIdentity = speakerIdentity;
+      this.turnState = 'HUMAN_SPEAKING';
+      this.isSpeakerContextSentForCurrentTurn = false;
+
+      const participant = this.participants.get(speakerIdentity);
+      this.currentSpeakerName = participant?.displayName || 'Friend';
+
+      // Initialize turn metrics
+      this.turnMetrics = {
+        speaker: this.currentSpeakerName,
+        speakerIdentity,
+        speakerSpeechStartAt: clientSentAt || now,
+        speakerSpeechEndAt: 0,
+        firstPcmCapturedAt: clientCapturedAt || now,
+        lastPcmCapturedAt: clientCapturedAt || now,
+        firstPcmSentToServerAt: clientSentAt || now,
+        lastPcmSentToServerAt: clientSentAt || now,
+        firstPcmReceivedBySunnyControllerAt: now,
+        lastPcmReceivedBySunnyControllerAt: now,
+        audioStreamEndSentAt: 0,
+        geminiFirstAudioSentAt: 0,
+        geminiLastAudioSentAt: 0,
+        geminiResponseStartedAt: 0,
+        geminiFirstResponseAudioAt: 0,
+        pcmChunksForwarded: 0,
+        pcmBytesForwarded: 0,
       };
-    } else {
-      speakerTag = `[CURRENT_SPEAKER: UNKNOWN_GROUP_MEMBER (SHARED_MIC)]`;
-      this.recentSpeakerIdentity = {
-        displayName: 'Group',
-        identitySource: 'SHARED_MIC',
-      };
+
+      console.log(`[Sunny/Gate] Speaker gate ACQUIRED by "${this.currentSpeakerName}" (${speakerIdentity})`);
+    } else if (this.activeGeminiSpeakerIdentity !== speakerIdentity) {
+      // Another human is speaking while the active speaker is still talking
+      // Preserve human-to-human WebRTC audio, but do NOT mix their PCM into Gemini!
+      if (this.conversationalState !== 'MULTIPLE_HUMANS_SPEAKING') {
+        this.conversationalState = 'MULTIPLE_HUMANS_SPEAKING';
+        console.log(`[Sunny/Gate] Overlapping speech detected from "${this.participants.get(speakerIdentity)?.displayName || speakerIdentity}". Maintaining gate with "${this.currentSpeakerName}".`);
+      }
+      return;
     }
 
+    // Update timestamps for active speaker
+    if (this.turnMetrics) {
+      this.turnMetrics.lastPcmCapturedAt = clientCapturedAt || now;
+      this.turnMetrics.lastPcmSentToServerAt = clientSentAt || now;
+      this.turnMetrics.lastPcmReceivedBySunnyControllerAt = now;
+      this.turnMetrics.pcmChunksForwarded++;
+      this.turnMetrics.pcmBytesForwarded += pcmBase64.length * 0.75;
+    }
+
+    // 2. Send Speaker Context ONCE per turn before audio starts
+    if (!this.isSpeakerContextSentForCurrentTurn) {
+      this.isSpeakerContextSentForCurrentTurn = true;
+      const participant = this.participants.get(speakerIdentity);
+      let speakerTag = '';
+      if (deviceMode === 'INDIVIDUAL' && participant?.sunnyUserId) {
+        speakerTag = `[CURRENT_SPEAKER: "${participant.displayName}" (RTC_PARTICIPANT)]`;
+        this.recentSpeakerIdentity = {
+          userId: participant.sunnyUserId,
+          displayName: participant.displayName,
+          identitySource: 'RTC_PARTICIPANT',
+        };
+      } else {
+        speakerTag = `[CURRENT_SPEAKER: UNKNOWN_GROUP_MEMBER (SHARED_MIC)]`;
+        this.recentSpeakerIdentity = {
+          displayName: 'Group',
+          identitySource: 'SHARED_MIC',
+        };
+      }
+
+      try {
+        this.geminiSession.sendRealtimeInput({
+          text: speakerTag,
+        });
+      } catch (e) {
+        console.warn('Error setting speaker context for turn:', e);
+      }
+    }
+
+    // 3. Forward PCM chunk to Gemini Live (bounded, non-blocking)
+    if (!this.turnMetrics?.geminiFirstAudioSentAt) {
+      this.turnMetrics!.geminiFirstAudioSentAt = now;
+    }
+    this.turnMetrics!.geminiLastAudioSentAt = now;
+
     try {
-      // Send realtime PCM audio chunks to Gemini Live
       this.geminiSession.sendRealtimeInput({
         audio: {
           mimeType: 'audio/pcm;rate=16000',
@@ -511,7 +641,85 @@ ${groupMemoriesStr}
         },
       });
     } catch (err) {
-      console.warn('Error forwarding human audio to Gemini:', err);
+      console.warn('Error forwarding PCM chunk to Gemini:', err);
+    }
+  }
+
+  // Explicit End-of-Speech Finalization
+  public async handleAudioStreamEnd(
+    speakerIdentity: string,
+    timestamps?: {
+      speakerSpeechStartAt?: number;
+      speakerSpeechEndAt?: number;
+      firstPcmCapturedAt?: number;
+      lastPcmCapturedAt?: number;
+      firstPcmSentToServerAt?: number;
+      lastPcmSentToServerAt?: number;
+    }
+  ) {
+    if (!this.geminiSession || this.isDestroyed) return;
+    if (this.activeGeminiSpeakerIdentity !== speakerIdentity && this.activeGeminiSpeakerIdentity !== null) {
+      return;
+    }
+
+    const now = Date.now();
+    console.log(`[Sunny/Turn] Finalizing human turn for speaker "${this.currentSpeakerName || speakerIdentity}". Sending audioStreamEnd to Gemini Live.`);
+
+    this.turnState = 'FINALIZING_HUMAN_TURN';
+
+    if (this.turnMetrics) {
+      if (timestamps?.speakerSpeechEndAt) {
+        this.turnMetrics.speakerSpeechEndAt = timestamps.speakerSpeechEndAt;
+      } else if (!this.turnMetrics.speakerSpeechEndAt) {
+        this.turnMetrics.speakerSpeechEndAt = now;
+      }
+      this.turnMetrics.audioStreamEndSentAt = now;
+    }
+
+    // 1. Explicitly inform Gemini that the human audio stream / turn has ended
+    try {
+      this.geminiSession.sendRealtimeInput({
+        audioStreamEnd: true,
+      });
+    } catch (err) {
+      console.warn('Error sending audioStreamEnd to Gemini:', err);
+    }
+
+    this.turnState = 'WAITING_FOR_GEMINI';
+    this.updateStatus('thinking');
+
+    // 2. Start 5-second Latency Watchdog
+    this.startLatencyWatchdog();
+
+    // 3. Clear active speaker gate so next speaker or Sunny can speak
+    this.activeGeminiSpeakerIdentity = null;
+    this.isSpeakerContextSentForCurrentTurn = false;
+  }
+
+  private startLatencyWatchdog() {
+    this.clearLatencyWatchdog();
+
+    const speechEnd = this.turnMetrics?.speakerSpeechEndAt || Date.now();
+    const speaker = this.currentSpeakerName;
+
+    this.latencyWatchdogTimer = setTimeout(() => {
+      const durationSinceSpeechEnd = Date.now() - speechEnd;
+      if (this.turnState === 'WAITING_FOR_GEMINI' || this.turnState === 'FINALIZING_HUMAN_TURN') {
+        console.warn(`\n⚠️ [SUNNY_LATENCY_WARNING] No Gemini response after ${durationSinceSpeechEnd}ms! Diagnostics:`, {
+          speaker,
+          turnState: this.turnState,
+          currentStatus: this.currentStatus,
+          conversationalState: this.conversationalState,
+          turnMetrics: this.turnMetrics,
+        });
+      }
+    }, 5000);
+  }
+
+  private clearLatencyWatchdog() {
+    if (this.latencyWatchdogTimer) {
+      clearTimeout(this.latencyWatchdogTimer);
+      this.latencyWatchdogTimer = null;
     }
   }
 

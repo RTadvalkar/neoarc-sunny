@@ -310,7 +310,9 @@ export class RoomManager {
               await room.sunnyController.handleHumanAudio(
                 participantIdentity,
                 msg.audio,
-                client.deviceMode
+                client.deviceMode,
+                msg.capturedAt,
+                msg.sentAt
               );
 
               // Broadcast human audio to other participants in the room
@@ -328,6 +330,12 @@ export class RoomManager {
             break;
           }
 
+          // Explicit audio stream turn finalization from client VAD
+          case 'audio_stream_end': {
+            await room.sunnyController.handleAudioStreamEnd(participantIdentity, msg.timestamps);
+            break;
+          }
+
           // Update speaking status from client VAD
           case 'speaking': {
             const isSpeaking = Boolean(msg.isSpeaking);
@@ -341,7 +349,12 @@ export class RoomManager {
             });
 
             // Inform Sunny Room Controller
-            room.sunnyController.onParticipantSpeakingChanged(participantIdentity, isSpeaking);
+            room.sunnyController.onParticipantSpeakingChanged(
+              participantIdentity,
+              isSpeaking,
+              msg.speakerSpeechStartAt,
+              msg.speakerSpeechEndAt
+            );
             break;
           }
 
