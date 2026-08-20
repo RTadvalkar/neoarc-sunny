@@ -1,6 +1,7 @@
 import express from 'express';
 import http from 'http';
 import path from 'path';
+import fs from 'fs';
 import { WebSocketServer, WebSocket } from 'ws';
 import { GoogleGenAI, Modality, Type } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
@@ -65,9 +66,13 @@ async function startServer() {
     return `${proto}://${host}`;
   };
 
-  // Direct Invitation Web Routes
+  // Direct Invitation & Group Call Web Routes
   app.get(['/invite/:token', '/join/:token'], (req, res) => {
     res.redirect(`/?invite=${encodeURIComponent(req.params.token)}`);
+  });
+
+  app.get(['/groups/:groupId/call/:sessionId', '/group/:groupId/call/:sessionId'], (req, res) => {
+    res.redirect(`/?groupId=${encodeURIComponent(req.params.groupId)}&callSession=${encodeURIComponent(req.params.sessionId)}`);
   });
 
   // --- REST API ENDPOINTS ---
@@ -1721,6 +1726,22 @@ ${groupMemoriesStr}
       appType: 'spa',
     });
     app.use(vite.middlewares);
+    app.use('*', async (req, res, next) => {
+      const url = req.originalUrl;
+      try {
+        const indexPath = path.resolve(process.cwd(), 'index.html');
+        if (fs.existsSync(indexPath)) {
+          let template = fs.readFileSync(indexPath, 'utf-8');
+          template = await vite.transformIndexHtml(url, template);
+          res.status(200).set({ 'Content-Type': 'text/html' }).end(template);
+        } else {
+          next();
+        }
+      } catch (e) {
+        vite.ssrFixStacktrace(e as Error);
+        next(e);
+      }
+    });
   } else {
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));

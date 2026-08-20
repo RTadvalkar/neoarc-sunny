@@ -12,7 +12,7 @@ export function getPublicAppOrigin(): string {
 
 export function buildGroupCallJoinUrl(groupId: string, sessionId: string): string {
   const origin = getPublicAppOrigin();
-  return `${origin}/groups/${groupId}/call/${sessionId}`;
+  return `${origin}/?groupId=${encodeURIComponent(groupId)}&callSession=${encodeURIComponent(sessionId)}`;
 }
 
 export async function copyToClipboard(text: string): Promise<boolean> {
