@@ -106,21 +106,9 @@ function SunnyApp() {
   // Detect and load invitation or group call from URL params or path on initial mount
   useEffect(() => {
     try {
-      const urlParams = new URLSearchParams(window.location.search);
-
-      // 1. Check for Group Call Deep-Link: query params (?groupId=...&callSession=...) or path (/groups/:groupId/call/:sessionId)
-      const callSessionParam = urlParams.get('callSession') || urlParams.get('call') || urlParams.get('sessionId') || urlParams.get('session');
-      const groupIdParam = urlParams.get('groupId') || urlParams.get('group');
+      // 1. Check for Group Call Deep-Link: /groups/:groupId/call/:sessionId
       const pathMatchesCall = window.location.pathname.match(/^\/groups\/([^/]+)\/call\/([^/]+)/);
-
-      if (groupIdParam && callSessionParam) {
-        setPendingGroupCall({
-          groupId: groupIdParam,
-          sessionId: callSessionParam,
-        });
-        setActiveTab('voice');
-        return;
-      } else if (pathMatchesCall) {
+      if (pathMatchesCall) {
         setPendingGroupCall({
           groupId: pathMatchesCall[1],
           sessionId: pathMatchesCall[2],
@@ -130,6 +118,7 @@ function SunnyApp() {
       }
 
       // 2. Check for Group Invitation: ?invite=... or /invite/:token
+      const urlParams = new URLSearchParams(window.location.search);
       const inviteParam = urlParams.get('invite');
       const pathMatchesInvite = window.location.pathname.match(/^\/(?:invite|join)\/([^/]+)/);
       const token = inviteParam || (pathMatchesInvite ? pathMatchesInvite[1] : null);
