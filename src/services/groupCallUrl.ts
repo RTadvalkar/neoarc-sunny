@@ -3,11 +3,7 @@
  */
 
 export function getPublicAppOrigin(): string {
-  let origin = window.location.origin;
-  if (origin.includes('ais-dev-')) {
-    origin = origin.replace('ais-dev-', 'ais-pre-');
-  }
-  return origin.replace(/\/$/, '');
+  return window.location.origin.replace(/\/$/, '');
 }
 
 export function buildGroupCallJoinUrl(groupId: string, sessionId: string): string {

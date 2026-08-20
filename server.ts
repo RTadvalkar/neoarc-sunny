@@ -36,32 +36,21 @@ async function startServer() {
   app.set('trust proxy', true);
   app.use(express.json());
 
-  // Helper to determine accurate public base URL (converts private ais-dev to shared ais-pre so all links work externally)
+  // Helper to determine accurate public base URL
   const getPublicBaseUrl = (req: express.Request) => {
     let candidate = (req.body && req.body.appUrl) || (req.query && req.query.appUrl) || (req.headers.origin as string) || (req.headers.referer as string) || '';
     if (candidate && typeof candidate === 'string' && candidate.startsWith('http')) {
       try {
         const u = new URL(candidate);
-        let host = u.host;
-        if (host.includes('ais-dev-')) {
-          host = host.replace('ais-dev-', 'ais-pre-');
-        }
-        return `${u.protocol}//${host}`;
+        return `${u.protocol}//${u.host}`;
       } catch {}
     }
 
     if (process.env.APP_URL && process.env.APP_URL.startsWith('http')) {
-      let u = process.env.APP_URL.replace(/\/$/, '');
-      if (u.includes('ais-dev-')) {
-        u = u.replace('ais-dev-', 'ais-pre-');
-      }
-      return u;
+      return process.env.APP_URL.replace(/\/$/, '');
     }
 
     let host = (req.headers['x-forwarded-host'] as string) || req.get('host') || 'localhost:3000';
-    if (host.includes('ais-dev-')) {
-      host = host.replace('ais-dev-', 'ais-pre-');
-    }
     const proto = (req.headers['x-forwarded-proto'] as string) || (req.protocol === 'http' && req.headers['x-forwarded-host'] ? 'https' : req.protocol) || 'https';
     return `${proto}://${host}`;
   };

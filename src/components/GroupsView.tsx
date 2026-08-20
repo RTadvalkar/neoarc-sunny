@@ -46,11 +46,7 @@ export const GroupsView: React.FC<GroupsViewProps> = ({ onStartGroupCall }) => {
 
   // Helper to ensure public accessible origin (replaces private ais-dev- with shared ais-pre-)
   const getPublicOrigin = () => {
-    let origin = window.location.origin;
-    if (origin.includes('ais-dev-')) {
-      origin = origin.replace('ais-dev-', 'ais-pre-');
-    }
-    return origin.replace(/\/$/, '');
+    return window.location.origin.replace(/\/$/, '');
   };
 
   const getPublicInviteUrl = (token: string) => {
