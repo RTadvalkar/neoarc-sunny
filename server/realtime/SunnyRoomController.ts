@@ -133,6 +133,7 @@ export class SunnyRoomController {
 
   // Interruption & Post-Interruption Telemetry
   private isInterrupted: boolean = false;
+  private isSunnyMuted: boolean = false;
   private postInterruptionAudioChunkCount: number = 0;
   private postInterruptionAudioBytes: number = 0;
   private postInterruptionAudioDurationMs: number = 0;
@@ -202,6 +203,28 @@ export class SunnyRoomController {
         await this.geminiSession.close?.();
       } catch {}
       this.geminiSession = null;
+    }
+  }
+
+  public getIsMuted(): boolean {
+    return this.isSunnyMuted;
+  }
+
+  public setMuted(muted: boolean, mutedBy?: string) {
+    this.isSunnyMuted = muted;
+    console.log(`[Sunny/Mute] Sunny was ${muted ? 'MUTED' : 'UNMUTED'} by ${mutedBy || 'Admin'}`);
+
+    if (muted) {
+      if (this.turnState === 'SUNNY_SPEAKING' || this.currentStatus === 'speaking' || this.currentStatus === 'thinking') {
+        this.interruptSunny();
+      }
+      this.updateStatus('idle');
+      this.callbacks.broadcastSunnyTranscript(`(सन्नीला ${mutedBy || 'Admin'} कडून म्यूट केले आहे / Sunny was muted by ${mutedBy || 'Admin'})`, 'system');
+    } else {
+      this.isInterrupted = false;
+      this.turnState = 'IDLE';
+      this.updateStatus('listening');
+      this.callbacks.broadcastSunnyTranscript(`(सन्नीला ${mutedBy || 'Admin'} कडून अनम्यूट केले आहे / Sunny was unmuted by ${mutedBy || 'Admin'})`, 'system');
     }
   }
 
@@ -444,10 +467,15 @@ ${groupMemoriesStr}
                       return;
                     }
 
+                    // If Sunny is muted, drop output audio without broadcasting
+                    if (this.isSunnyMuted) {
+                      return;
+                    }
+
                     this.updateStatus('speaking');
                     this.callbacks.broadcastSunnyAudio(part.inlineData.data);
                   }
-                  if (part.text && !this.isInterrupted) {
+                  if (part.text && !this.isInterrupted && !this.isSunnyMuted) {
                     this.callbacks.broadcastSunnyTranscript(part.text, 'sunny');
                     // Persist utterance
                     await conversationRepo.addUtterance(this.conversationId, {
@@ -575,6 +603,8 @@ ${groupMemoriesStr}
     const humanSpeakingCount = Array.from(this.activeSpeakers).filter((id) => id !== 'sunny-agent').length;
 
     if (humanSpeakingCount === 0) {
+      this.conversationalState = 'NO_HUMAN_SPEAKING';
+
       // If the active speaker stopped speaking, finalize turn
       if (this.activeGeminiSpeakerIdentity === identity || this.turnState === 'HUMAN_SPEAKING') {
         this.handleAudioStreamEnd(identity, {
@@ -584,7 +614,6 @@ ${groupMemoriesStr}
       }
 
       if (this.turnState !== 'SUNNY_SPEAKING' && this.turnState !== 'WAITING_FOR_GEMINI' && this.turnState !== 'FINALIZING_HUMAN_TURN') {
-        this.conversationalState = 'NO_HUMAN_SPEAKING';
         this.updateStatus('listening');
       }
     } else if (humanSpeakingCount === 1) {
@@ -621,7 +650,7 @@ ${groupMemoriesStr}
     clientCapturedAt?: number,
     clientSentAt?: number
   ) {
-    if (!this.geminiSession || this.isDestroyed) return;
+    if (!this.geminiSession || this.isDestroyed || this.isSunnyMuted) return;
 
     const now = Date.now();
 
@@ -735,7 +764,10 @@ ${groupMemoriesStr}
       lastPcmSentToServerAt?: number;
     }
   ) {
-    if (!this.geminiSession || this.isDestroyed) return;
+    if (!this.geminiSession || this.isDestroyed || this.isSunnyMuted) {
+      this.activeGeminiSpeakerIdentity = null;
+      return;
+    }
     if (this.activeGeminiSpeakerIdentity !== speakerIdentity && this.activeGeminiSpeakerIdentity !== null) {
       return;
     }
@@ -803,7 +835,7 @@ ${groupMemoriesStr}
 
   // Handle text input (e.g. direct Marathi prompt or nudge from in-room chat)
   public async handleTextInput(text: string, senderName: string) {
-    if (!this.geminiSession || this.isDestroyed) return;
+    if (!this.geminiSession || this.isDestroyed || this.isSunnyMuted) return;
 
     this.updateStatus('thinking');
     try {

@@ -17,6 +17,7 @@ export interface RoomEventHandlers {
   onParticipantsChange?: (participants: RoomParticipant[]) => void;
   onActiveSpeakersChange?: (speakers: string[]) => void;
   onSunnyStatusChange?: (status: 'idle' | 'listening' | 'thinking' | 'speaking' | 'reconnecting') => void;
+  onSunnyMuteChange?: (isMuted: boolean, mutedBy?: string) => void;
   onTranscript?: (entry: { sender: 'user' | 'sunny' | 'system'; text: string; speakerName?: string; time: string }) => void;
   onMemorySaved?: (memory: Memory) => void;
   onHighlightSaved?: (highlight: Highlight) => void;
@@ -550,6 +551,24 @@ export class WebRTCRoomService {
         break;
       }
 
+      case 'sunny_mute_changed': {
+        const sunny = this.participants.get('sunny-agent');
+        if (sunny) {
+          sunny.isMuted = Boolean(msg.isMuted);
+          if (msg.isMuted) {
+            sunny.isSpeaking = false;
+          }
+          this.notifyParticipantsChange();
+        }
+        if (msg.isMuted) {
+          this.stopSunnyPlayback();
+        }
+        if (this.handlers.onSunnyMuteChange) {
+          this.handlers.onSunnyMuteChange(Boolean(msg.isMuted), msg.mutedBy);
+        }
+        break;
+      }
+
       case 'session_ended': {
         this.updateConnectionState('ENDED');
         this.handlers.onSessionEnded?.(msg.message || 'Call has ended.');
@@ -998,5 +1017,11 @@ export class WebRTCRoomService {
 
   public getDeviceMode(): DeviceAudioMode {
     return this.deviceMode;
+  }
+
+  public setSunnyMute(isMuted: boolean): void {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ type: 'set_sunny_mute', isMuted }));
+    }
   }
 }

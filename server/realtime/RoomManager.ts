@@ -13,6 +13,7 @@ import {
   groupRepo,
   userRepo,
   conversationRepo,
+  ADMIN_EMAIL_ALLOWLIST,
 } from '../repositories';
 
 export interface RoomClient {
@@ -217,7 +218,7 @@ export class RoomManager {
       isAI: true,
       isLocal: false,
       isSpeaking: room.sunnyController.getStatus() === 'speaking',
-      isMuted: false,
+      isMuted: room.sunnyController.getIsMuted(),
       isCameraOn: false,
       joinedAt: room.createdAt,
       deviceMode: 'INDIVIDUAL',
@@ -406,6 +407,40 @@ export class RoomManager {
           // Client leaves voluntarily
           case 'leave': {
             this.handleClientLeave(room, participantIdentity);
+            break;
+          }
+
+          // Admin or host muting/unmuting Sunny in the group call
+          case 'set_sunny_mute': {
+            const isAuthorized =
+              client.sunnyUserId === session.startedByUserId ||
+              ADMIN_EMAIL_ALLOWLIST.includes(user.email) ||
+              user.role === 'ADMIN';
+
+            if (!isAuthorized) {
+              ws.send(JSON.stringify({ type: 'error', message: 'Only group call admins or hosts can mute or unmute Sunny.' }));
+              break;
+            }
+
+            const isMuted = Boolean(msg.isMuted);
+            room.sunnyController.setMuted(isMuted, client.displayName);
+
+            // Broadcast mute notification to all participants
+            this.broadcastToRoom(room.roomId, {
+              type: 'sunny_mute_changed',
+              isMuted,
+              mutedBy: client.displayName,
+            });
+
+            // Update participant status for Sunny
+            this.broadcastToRoom(room.roomId, {
+              type: 'participant_updated',
+              identity: 'sunny-agent',
+              updates: {
+                isMuted,
+                isSpeaking: isMuted ? false : undefined,
+              },
+            });
             break;
           }
         }

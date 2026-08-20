@@ -94,6 +94,9 @@ export const GroupRoomView: React.FC<GroupRoomViewProps> = ({
       onSunnyStatusChange: (status) => {
         setSunnyStatus(status);
       },
+      onSunnyMuteChange: (muted, mutedBy) => {
+        setToastMessage(muted ? `Sunny was muted by ${mutedBy || 'Admin'}` : `Sunny was unmuted by ${mutedBy || 'Admin'}`);
+      },
       onConnectionStateChange: (state) => {
         setConnectionState(state);
       },
@@ -221,6 +224,15 @@ export const GroupRoomView: React.FC<GroupRoomViewProps> = ({
     displayName: 'Sunny (सन्नी)',
     isAI: true,
     isSpeaking: sunnyStatus === 'speaking',
+    isMuted: false,
+  };
+  const isSunnyMuted = Boolean(sunnyParticipant.isMuted);
+
+  const handleToggleSunnyMute = () => {
+    if (!isHost) return;
+    const nextMute = !isSunnyMuted;
+    roomServiceRef.current?.setSunnyMute(nextMute);
+    setToastMessage(nextMute ? 'You muted Sunny in this call (सन्नी म्यूट केला)' : 'You unmuted Sunny (सन्नी अनम्यूट केला)');
   };
 
   return (
@@ -246,36 +258,43 @@ export const GroupRoomView: React.FC<GroupRoomViewProps> = ({
 
         {/* Sunny Status Pill */}
         <div className="flex items-center gap-2">
-          <div
-            className={`flex items-center gap-2 px-3 py-1 rounded-full text-xs font-medium border transition-colors ${
-              sunnyStatus === 'speaking'
-                ? 'bg-amber-500/20 text-amber-300 border-amber-500/50 shadow-sm shadow-amber-500/20'
-                : sunnyStatus === 'thinking'
-                ? 'bg-purple-500/20 text-purple-300 border-purple-500/40'
-                : sunnyStatus === 'reconnecting'
-                ? 'bg-rose-500/20 text-rose-300 border-rose-500/40 animate-pulse'
-                : 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30'
-            }`}
-          >
-            <Sparkles
-              className={`w-3.5 h-3.5 ${
+          {isSunnyMuted ? (
+            <div className="flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold border bg-rose-500/20 text-rose-300 border-rose-500/40 shadow-sm shadow-rose-500/20">
+              <VolumeX className="w-3.5 h-3.5 text-rose-400" />
+              <span>Sunny Muted (म्यूट)</span>
+            </div>
+          ) : (
+            <div
+              className={`flex items-center gap-2 px-3 py-1 rounded-full text-xs font-medium border transition-colors ${
                 sunnyStatus === 'speaking'
-                  ? 'text-amber-400 animate-spin'
+                  ? 'bg-amber-500/20 text-amber-300 border-amber-500/50 shadow-sm shadow-amber-500/20'
                   : sunnyStatus === 'thinking'
-                  ? 'text-purple-400 animate-pulse'
-                  : 'text-emerald-400'
+                  ? 'bg-purple-500/20 text-purple-300 border-purple-500/40'
+                  : sunnyStatus === 'reconnecting'
+                  ? 'bg-rose-500/20 text-rose-300 border-rose-500/40 animate-pulse'
+                  : 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30'
               }`}
-            />
-            <span>
-              {sunnyStatus === 'speaking'
-                ? 'Sunny speaking...'
-                : sunnyStatus === 'thinking'
-                ? 'Sunny thinking...'
-                : sunnyStatus === 'reconnecting'
-                ? 'Sunny reconnecting...'
-                : 'Sunny listening'}
-            </span>
-          </div>
+            >
+              <Sparkles
+                className={`w-3.5 h-3.5 ${
+                  sunnyStatus === 'speaking'
+                    ? 'text-amber-400 animate-spin'
+                    : sunnyStatus === 'thinking'
+                    ? 'text-purple-400 animate-pulse'
+                    : 'text-emerald-400'
+                }`}
+              />
+              <span>
+                {sunnyStatus === 'speaking'
+                  ? 'Sunny speaking...'
+                  : sunnyStatus === 'thinking'
+                  ? 'Sunny thinking...'
+                  : sunnyStatus === 'reconnecting'
+                  ? 'Sunny reconnecting...'
+                  : 'Sunny listening'}
+              </span>
+            </div>
+          )}
 
           {/* Side Drawer Toggles */}
           <div className="flex items-center gap-1">
@@ -377,16 +396,27 @@ export const GroupRoomView: React.FC<GroupRoomViewProps> = ({
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 max-w-7xl mx-auto w-full">
             {/* 🌟 SUNNY AI PARTICIPANT TILE */}
             <div
-              className={`relative rounded-2xl bg-gradient-to-b from-slate-900 to-slate-900/90 border transition-all duration-300 overflow-hidden flex flex-col items-center justify-center p-6 min-h-[220px] aspect-video sm:aspect-square ${
-                sunnyStatus === 'speaking'
-                  ? 'border-amber-400 shadow-lg shadow-amber-500/20 ring-2 ring-amber-400/40'
-                  : 'border-slate-800 hover:border-slate-700'
+              className={`relative rounded-2xl border transition-all duration-300 overflow-hidden flex flex-col items-center justify-center p-6 min-h-[220px] aspect-video sm:aspect-square ${
+                isSunnyMuted
+                  ? 'bg-gradient-to-b from-slate-900 via-rose-950/15 to-slate-900 border-rose-500/40 shadow-md shadow-rose-950/20'
+                  : sunnyStatus === 'speaking'
+                  ? 'bg-gradient-to-b from-slate-900 to-slate-900/90 border-amber-400 shadow-lg shadow-amber-500/20 ring-2 ring-amber-400/40'
+                  : 'bg-gradient-to-b from-slate-900 to-slate-900/90 border-slate-800 hover:border-slate-700'
               }`}
             >
-              {/* AI Badge */}
-              <div className="absolute top-3 left-3 flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-500/15 border border-amber-500/30 text-amber-300 text-[11px] font-semibold">
-                <Sparkles className="w-3 h-3 text-amber-400" />
-                <span>AI Participant</span>
+              {/* AI / Mute Status Badge */}
+              <div className="absolute top-3 left-3 flex items-center gap-1.5">
+                {isSunnyMuted ? (
+                  <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-rose-500/15 border border-rose-500/30 text-rose-300 text-[11px] font-semibold">
+                    <VolumeX className="w-3 h-3 text-rose-400" />
+                    <span>Muted by Admin</span>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-500/15 border border-amber-500/30 text-amber-300 text-[11px] font-semibold">
+                    <Sparkles className="w-3 h-3 text-amber-400" />
+                    <span>AI Participant</span>
+                  </div>
+                )}
               </div>
 
               {/* Dialect / Persona Badge */}
@@ -398,20 +428,31 @@ export const GroupRoomView: React.FC<GroupRoomViewProps> = ({
               <div className="relative my-auto flex flex-col items-center">
                 <div
                   className={`w-20 h-20 sm:w-24 sm:h-24 rounded-full flex items-center justify-center relative transition-transform ${
-                    sunnyStatus === 'speaking' ? 'scale-105' : ''
+                    !isSunnyMuted && sunnyStatus === 'speaking' ? 'scale-105' : ''
                   }`}
                 >
-                  {/* Glowing rings when speaking */}
-                  {sunnyStatus === 'speaking' && (
+                  {/* Glowing rings when speaking (only when unmuted) */}
+                  {!isSunnyMuted && sunnyStatus === 'speaking' && (
                     <>
                       <div className="absolute inset-0 rounded-full bg-amber-500/20 animate-ping"></div>
                       <div className="absolute -inset-2 rounded-full border-2 border-amber-400/60 animate-pulse"></div>
                     </>
                   )}
 
-                  <div className="w-full h-full rounded-full bg-gradient-to-tr from-amber-500 via-orange-500 to-yellow-400 p-1 shadow-md">
-                    <div className="w-full h-full rounded-full bg-slate-900 flex items-center justify-center text-3xl">
+                  <div
+                    className={`w-full h-full rounded-full p-1 shadow-md ${
+                      isSunnyMuted
+                        ? 'bg-gradient-to-tr from-slate-700 to-slate-800 opacity-80'
+                        : 'bg-gradient-to-tr from-amber-500 via-orange-500 to-yellow-400'
+                    }`}
+                  >
+                    <div className="w-full h-full rounded-full bg-slate-900 flex items-center justify-center text-3xl relative">
                       🌟
+                      {isSunnyMuted && (
+                        <div className="absolute -bottom-1 -right-1 p-1 rounded-full bg-rose-600 text-white border-2 border-slate-900 shadow-md">
+                          <VolumeX className="w-3.5 h-3.5" />
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -419,8 +460,12 @@ export const GroupRoomView: React.FC<GroupRoomViewProps> = ({
                 <h3 className="mt-3 text-base font-bold text-white tracking-tight flex items-center gap-1.5">
                   Sunny (सन्नी)
                 </h3>
-                <p className="text-xs text-slate-400 font-medium">
-                  {sunnyStatus === 'speaking' ? (
+                <p className="text-xs text-slate-400 font-medium text-center">
+                  {isSunnyMuted ? (
+                    <span className="text-rose-400 font-semibold flex items-center gap-1">
+                      <VolumeX className="w-3.5 h-3.5" /> Muted by Host (म्यूट आहे)
+                    </span>
+                  ) : sunnyStatus === 'speaking' ? (
                     <span className="text-amber-400 flex items-center gap-1">
                       <Volume2 className="w-3.5 h-3.5 animate-bounce" /> Speaking in Marathi...
                     </span>
@@ -430,33 +475,58 @@ export const GroupRoomView: React.FC<GroupRoomViewProps> = ({
                     'Listening actively'
                   )}
                 </p>
+
+                {/* Admin Quick Mute / Unmute Button on Tile */}
+                {isHost && (
+                  <button
+                    onClick={handleToggleSunnyMute}
+                    className={`mt-3 flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all shadow-md active:scale-95 border z-10 ${
+                      isSunnyMuted
+                        ? 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-400/60 shadow-emerald-600/30'
+                        : 'bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border-rose-500/50 hover:border-rose-400'
+                    }`}
+                    title={isSunnyMuted ? 'Unmute Sunny for everyone in this call' : 'Mute Sunny so he will stay silent'}
+                  >
+                    {isSunnyMuted ? (
+                      <>
+                        <Volume2 className="w-3.5 h-3.5 text-emerald-300" />
+                        <span>Unmute Sunny (अनम्यूट)</span>
+                      </>
+                    ) : (
+                      <>
+                        <VolumeX className="w-3.5 h-3.5 text-rose-400" />
+                        <span>Mute Sunny (म्यूट करा)</span>
+                      </>
+                    )}
+                  </button>
+                )}
               </div>
 
               {/* Audio Waveform Indicator */}
               <div className="absolute bottom-3 left-0 right-0 px-4 flex items-center justify-center gap-1">
                 <div
                   className={`w-1 h-3 rounded-full transition-all duration-150 ${
-                    sunnyStatus === 'speaking' ? 'bg-amber-400 h-6 animate-pulse' : 'bg-slate-700'
+                    !isSunnyMuted && sunnyStatus === 'speaking' ? 'bg-amber-400 h-6 animate-pulse' : 'bg-slate-700'
                   }`}
                 />
                 <div
                   className={`w-1 h-4 rounded-full transition-all duration-150 ${
-                    sunnyStatus === 'speaking' ? 'bg-amber-400 h-8 animate-pulse delay-75' : 'bg-slate-700'
+                    !isSunnyMuted && sunnyStatus === 'speaking' ? 'bg-amber-400 h-8 animate-pulse delay-75' : 'bg-slate-700'
                   }`}
                 />
                 <div
                   className={`w-1 h-2 rounded-full transition-all duration-150 ${
-                    sunnyStatus === 'speaking' ? 'bg-amber-400 h-5 animate-pulse delay-150' : 'bg-slate-700'
+                    !isSunnyMuted && sunnyStatus === 'speaking' ? 'bg-amber-400 h-5 animate-pulse delay-150' : 'bg-slate-700'
                   }`}
                 />
                 <div
                   className={`w-1 h-5 rounded-full transition-all duration-150 ${
-                    sunnyStatus === 'speaking' ? 'bg-amber-400 h-7 animate-pulse delay-100' : 'bg-slate-700'
+                    !isSunnyMuted && sunnyStatus === 'speaking' ? 'bg-amber-400 h-7 animate-pulse delay-100' : 'bg-slate-700'
                   }`}
                 />
                 <div
                   className={`w-1 h-3 rounded-full transition-all duration-150 ${
-                    sunnyStatus === 'speaking' ? 'bg-amber-400 h-4 animate-pulse' : 'bg-slate-700'
+                    !isSunnyMuted && sunnyStatus === 'speaking' ? 'bg-amber-400 h-4 animate-pulse' : 'bg-slate-700'
                   }`}
                 />
               </div>
@@ -776,6 +846,22 @@ export const GroupRoomView: React.FC<GroupRoomViewProps> = ({
             <PhoneOff className="w-4 h-4" />
             <span>Leave</span>
           </button>
+
+          {/* Admin Mute Sunny In Call */}
+          {isHost && (
+            <button
+              onClick={handleToggleSunnyMute}
+              className={`flex items-center gap-1.5 px-3 h-12 rounded-2xl border text-xs font-bold transition-all shadow-md active:scale-95 ${
+                isSunnyMuted
+                  ? 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-400/80 shadow-emerald-600/30'
+                  : 'bg-slate-800 hover:bg-slate-700 text-amber-300 hover:text-amber-200 border-slate-700'
+              }`}
+              title={isSunnyMuted ? 'Unmute Sunny for all participants in this call' : 'Mute Sunny in this call'}
+            >
+              {isSunnyMuted ? <Volume2 className="w-4 h-4 text-emerald-300" /> : <VolumeX className="w-4 h-4 text-rose-400" />}
+              <span className="hidden sm:inline">{isSunnyMuted ? 'Unmute Sunny' : 'Mute Sunny'}</span>
+            </button>
+          )}
 
           {/* Admin End Call For All */}
           {isHost && (
