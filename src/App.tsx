@@ -398,25 +398,24 @@ function SunnyApp() {
         throw new Error('Please select or create a Circle (कट्टा / मंडळ) first to start a group call with Sunny.');
       }
 
-      let session: GroupConversationSession;
+      let session: GroupConversationSession | null = null;
 
       if (specificSessionId) {
-        // Fetch specific session details
-        const sessRes = await fetch(`/api/groups/${targetGroupId}/sessions/${specificSessionId}?userId=${currentUser.id}`);
-        if (!sessRes.ok) {
-          const err = await sessRes.json().catch(() => ({}));
-          throw new Error(err.error || 'This call is unavailable.');
+        try {
+          const sessRes = await fetch(`/api/groups/${targetGroupId}/sessions/${specificSessionId}?userId=${currentUser.id}`);
+          if (sessRes.ok) {
+            const sessData = await sessRes.json();
+            if (sessData.session && (sessData.session.status === 'LIVE' || sessData.session.status === 'STARTING')) {
+              session = sessData.session;
+            }
+          }
+        } catch (e) {
+          console.warn('Could not fetch specific session, will fallback to active room:', e);
         }
-        const sessData = await sessRes.json();
-        if (!sessData.isMember) {
-          throw new Error('You are not a member of this group. Only accepted group members can join this call.');
-        }
-        if (sessData.session.status !== 'LIVE' && sessData.session.status !== 'STARTING') {
-          throw new Error('This call has ended.');
-        }
-        session = sessData.session;
-      } else {
-        // Start or get active session
+      }
+
+      if (!session) {
+        // Start or get existing active session for this group
         const startRes = await fetch(`/api/groups/${targetGroupId}/sessions/start`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -424,7 +423,7 @@ function SunnyApp() {
         });
         if (!startRes.ok) {
           const err = await startRes.json().catch(() => ({}));
-          throw new Error(err.error || 'Failed to start group call session');
+          throw new Error(err.error || 'Failed to connect to group call session');
         }
         const startData = await startRes.json();
         session = startData.session;
@@ -854,23 +853,36 @@ function SunnyApp() {
                     </button>
                   </div>
                 ) : groupCallVerification && !groupCallVerification.isMember ? (
-                  /* Not an Active Group Member */
+                  /* Not Signed In OR Not an Active Group Member */
                   <div className="w-full bg-zinc-900/90 p-6 rounded-3xl border border-zinc-800 text-center space-y-4 shadow-xl">
                     <div className="w-12 h-12 rounded-2xl bg-amber-500/20 text-amber-400 flex items-center justify-center mx-auto border border-amber-500/30">
-                      <Ban className="w-6 h-6" />
+                      {!currentUser ? <LogIn className="w-6 h-6" /> : <Ban className="w-6 h-6" />}
                     </div>
                     <div className="space-y-1.5">
-                      <h3 className="text-base font-bold text-white">You are not a member of this group.</h3>
+                      <h3 className="text-base font-bold text-white">
+                        {!currentUser ? 'Sign In to Join Group Call' : 'You are not a member of this group.'}
+                      </h3>
                       <p className="text-xs text-zinc-300">
-                        Only accepted group members can join this call{groupCallVerification.group?.name ? ` for "${groupCallVerification.group.name}"` : ''}.
+                        {!currentUser
+                          ? `Sign in with your Google or email account to join the live call for "${groupCallVerification.group?.name || 'this circle'}".`
+                          : `Only accepted group members can join this call for "${groupCallVerification.group?.name || 'this group'}".`}
                       </p>
                     </div>
-                    <button
-                      onClick={handleDismissGroupCallLobby}
-                      className="w-full py-3 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-bold text-xs rounded-xl transition"
-                    >
-                      Go Back
-                    </button>
+                    {!currentUser ? (
+                      <button
+                        onClick={() => setIsAuthModalOpen(true)}
+                        className="w-full py-3 bg-[#F27D26] hover:bg-[#ff8a38] text-slate-950 font-bold text-xs rounded-xl transition shadow-lg flex items-center justify-center gap-2"
+                      >
+                        <LogIn className="w-4 h-4" /> Sign In to Join Call
+                      </button>
+                    ) : (
+                      <button
+                        onClick={handleDismissGroupCallLobby}
+                        className="w-full py-3 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-bold text-xs rounded-xl transition"
+                      >
+                        Go Back
+                      </button>
+                    )}
                   </div>
                 ) : groupCallVerification && groupCallVerification.session?.status !== 'LIVE' && groupCallVerification.session?.status !== 'STARTING' ? (
                   /* Call Has Ended */

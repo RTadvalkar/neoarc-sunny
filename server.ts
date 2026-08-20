@@ -970,9 +970,15 @@ async function startServer() {
         return res.status(404).json({ error: 'This call is unavailable.' });
       }
 
-      const session = await groupSessionRepo.getById(sessionId);
+      let session = await groupSessionRepo.getById(sessionId);
       if (!session || session.groupId !== groupId) {
-        return res.status(404).json({ error: 'This call is unavailable.' });
+        // Fallback: Check if this group has an active live session
+        const activeSess = await groupSessionRepo.getActiveByGroupId(groupId);
+        if (activeSess) {
+          session = activeSess;
+        } else {
+          return res.status(404).json({ error: 'This call is unavailable.' });
+        }
       }
 
       let isMember = false;
